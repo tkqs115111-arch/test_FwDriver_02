@@ -1,142 +1,141 @@
 // =========================================================
-//  PART 1: 設定與 API 串接 (取代原本的模擬資料)
+//  PART 1: 設定與 API 串接
 // =========================================================
 
-// 1. 設定你的 Google Sheet ID
 const SPREADSHEET_ID = '1tJjquBs-Wyav4VEg7XF-BnTAGoWhE-5RFwwhU16GuwQ'; 
-// 例如: '1P-xxxxxxxxxxxxxxxxxxxxxxxxxxxx'
 
-// 2. 定義你要抓取的 Sheet 名稱 (必須與 Google Sheet 下方頁籤名稱一致)
-// OpenSheet 會自動對應這些名稱
+// ★ 修改 1: 在這裡加入 'FW' Sheet
 const TARGET_SHEETS = [
     'Windows', 
     'RHEL', 
     'Oracle', 
-    'ESXi'
+    'ESXi',
+    'FW'  // 新增這一個
 ];
 
-// 全域變數：儲存處理後的資料
 let allProducts = [];
 
-// 抓取單一 Sheet 的函式
 async function fetchSheetData(sheetName) {
     const url = `https://opensheet.elk.sh/${SPREADSHEET_ID}/${sheetName}`;
     try {
         const response = await fetch(url);
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
-        
-        // OpenSheet 有時會回傳錯誤訊息物件，需檢查是否為陣列
-        if (!Array.isArray(data)) {
-            console.warn(`Sheet [${sheetName}] 回傳格式可能有誤或為空`, data);
-            return [];
-        }
-        return data;
+        return Array.isArray(data) ? data : [];
     } catch (error) {
         console.error(`抓取 Sheet [${sheetName}] 失敗:`, error);
-        return []; // 失敗回傳空陣列，避免整個程式崩潰
+        return [];
     }
 }
 
 // =========================================================
-//  PART 2: 資料處理邏輯 (配合 Excel 新格式)
+//  PART 2: 資料處理邏輯 (包含 FW 與合併儲存格處理)
 // =========================================================
 
 async function initData() {
     const statusEl = document.getElementById('statusMsg');
     if(statusEl) statusEl.innerText = "正在讀取 Google Sheet 資料...";
 
-    // 使用 Promise.all 平行抓取所有 Sheet
     const sheetsPromises = TARGET_SHEETS.map(name => fetchSheetData(name));
-    
     let sheetsData = [];
     try {
         sheetsData = await Promise.all(sheetsPromises);
     } catch (e) {
-        if(statusEl) statusEl.innerText = "資料載入失敗，請檢查 Google Sheet 權限與名稱。";
+        if(statusEl) statusEl.innerText = "資料載入失敗。";
         return;
     }
 
     let aggregatedMap = {};
 
-sheetsData.forEach((sheet, index) => {
+    sheetsData.forEach((sheet, index) => {
         if (!Array.isArray(sheet)) return;
 
-        // ★ 修改 1: 宣告變數來記住上一個 Component 和 Vendor
+        // 取得當前 Sheet 的名稱
+        const currentSheetName = TARGET_SHEETS[index];
+        const isFwSheet = (currentSheetName === 'FW'); // 判斷是否為 FW 表
+
+        // 記憶變數 (處理合併儲存格用)
         let lastComponent = ''; 
-        let lastVendor = '';    // 新增：記住上一個廠商
+        let lastVendor = '';    
 
         sheet.forEach(item => {
             const desc = item.description || item.Description || item['Model Name'];
+            
+            // 欄位抓取 (包含大小寫容錯)
+            let rawComp = item.component || item.Component; 
+            let rawVendor = item.vendor || item.Vendor;
+            
             const swid = item.swid || item.SWID;
             const stat = item.status || item.Status;
-            const driverVer = item.driver || item.Driver || item.Version;
+            
+            // ★ 修改 2: 抓取 FW 欄位 (支援 'FW Version', 'FW', 'Version')
+            const fwVer = item['FW Version'] || item['FW'] || item.Version || item.FW;
+
+            // Driver 相關
+            const driverVer = item.driver || item.Driver || item.Version; // 注意：在非 FW 表這代表 Driver
             const osVer = item.os || item.OS;
 
-            // ★ 修改 2: 先抓取原始值
-            let rawComp = item.component || item.Component; 
-            let rawVendor = item.vendor || item.Vendor; // 新增：抓取原始廠商值
-
-            // 防呆
             if (!desc) return;
 
-            // ==========================================
-            // ★ 核心邏輯：Component 向下填滿
-            // ==========================================
+            // --- 自動填滿邏輯 (Component) ---
             if (rawComp && rawComp.trim() !== '') {
                 lastComponent = rawComp;
             } else {
                 rawComp = lastComponent;
             }
 
-            // ==========================================
-            // ★ 新增邏輯：Vendor 也向下填滿 (解決 Generic 問題)
-            // ==========================================
+            // --- 自動填滿邏輯 (Vendor) ---
             if (rawVendor && rawVendor.trim() !== '') {
                 lastVendor = rawVendor;
             } else {
                 rawVendor = lastVendor;
             }
-            // ==========================================
 
             const modelKey = desc.trim();
 
+            // 若該產品尚未建立，先初始化
             if (!aggregatedMap[modelKey]) {
                 aggregatedMap[modelKey] = {
                     id: swid || '',            
                     model: desc, 
-                    
-                    // ★ 修改 3: 使用處理過(已填滿)的 rawVendor
-                    brand: rawVendor || 'Generic', 
-                    
+                    brand: rawVendor || 'Generic',
                     type: rawComp || 'N/A',    
-                    status: stat || '', 
+                    status: stat || '',
+                    fw: 'N/A',  // ★ 初始化 FW 欄位
                     drivers: [] 
                 };
             }
 
-            aggregatedMap[modelKey].drivers.push({
-                os: osVer || TARGET_SHEETS[index], 
-                ver: driverVer || 'N/A'
-            });
+            // ★ 核心分流邏輯 ★
+            if (isFwSheet) {
+                // 如果這張表是 FW，我們只更新 fw 欄位，不加到 drivers 列表
+                if (fwVer) {
+                    aggregatedMap[modelKey].fw = fwVer;
+                }
+                // 如果 FW 表也有更新 Status 或 SWID，也可以在這裡覆蓋
+                if (swid) aggregatedMap[modelKey].id = swid;
+                if (stat) aggregatedMap[modelKey].status = stat;
+
+            } else {
+                // 如果是 OS Driver 表 (Windows, RHEL...)，加到 drivers 列表
+                aggregatedMap[modelKey].drivers.push({
+                    os: osVer || currentSheetName, 
+                    ver: driverVer || 'N/A'
+                });
+            }
         });
-    }); // 這裡結束 forEach (處理所有 Sheet)
+    });
 
-    // --- 修正點：必須等所有資料都跑完，才執行以下動作 ---
-
-    // 轉回陣列
     allProducts = Object.values(aggregatedMap);
-    
-    // 更新 UI
     renderSidebar();
     renderProducts(allProducts); 
     
     if(statusEl) statusEl.innerText = `載入完成，共整合 ${allProducts.length} 項元件資料。`;
-} 
+}
 
 // <--- 原本這裡少了一個大括號，導致程式崩潰
 // =========================================================
-//  PART 3: 渲染卡片 (已移除 PCI ID)
+//  PART 3: 渲染卡片 (新增 FW 顯示欄位)
 // =========================================================
 
 function renderProducts(data) {
@@ -155,7 +154,7 @@ function renderProducts(data) {
         // 排序 OS
         product.drivers.sort((a, b) => a.os.localeCompare(b.os));
 
-        // 1. Driver 列表
+        // 1. Driver 列表 DOM
         let driverRows = product.drivers.map((d, i) => {
             const isActive = (i === 0) ? 'active' : '';
             return `
@@ -165,7 +164,7 @@ function renderProducts(data) {
             </div>`;
         }).join('');
 
-        // 2. OS 切換按鈕
+        // 2. OS 按鈕 DOM
         let badges = product.drivers.map((d, i) => {
             const isActive = (i === 0) ? 'active' : '';
             let shortOs = d.os.replace('Microsoft', '').replace('Enterprise', '').trim();
@@ -179,7 +178,6 @@ function renderProducts(data) {
             </span>`;
         }).join('');
 
-        // ★ 修改點：移除 PCI ID 的 spec-row
         const html = `
         <div class="hw-card" id="${cardId}">
             <div class="card-header">
@@ -198,6 +196,10 @@ function renderProducts(data) {
                     <span class="spec-value">${product.id} <span style="color:#ccc">|</span> ${product.status}</span>
                 </div>
 
+                <div class="spec-row">
+                    <span class="spec-label">FW</span>
+                    <span class="spec-value" style="color: #2c3e50; font-weight: bold;">${product.fw}</span>
+                </div>
                 <div class="driver-container">
                     <div class="section-title">DRIVER VERSION:</div>
                     <div class="driver-box">
@@ -216,8 +218,6 @@ function renderProducts(data) {
         container.innerHTML += html;
     });
 }
-
-
 // =========================================================
 
 //  PART 4: 側邊欄與搜尋功能
@@ -384,5 +384,4 @@ window.switchDriver = function(cardId, driverIndex) {
 // 啟動程式
 
 window.onload = initData;
-
 
