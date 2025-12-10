@@ -60,35 +60,44 @@ async function initData() {
     let aggregatedMap = {};
 
 sheetsData.forEach((sheet, index) => {
-        // 確保 sheet 是陣列
         if (!Array.isArray(sheet)) return;
 
-        // ★ 修改 1: 在每一張 Sheet 開始前，宣告一個變數來記住上一個 Component
+        // ★ 修改 1: 宣告變數來記住上一個 Component 和 Vendor
         let lastComponent = ''; 
+        let lastVendor = '';    // 新增：記住上一個廠商
 
         sheet.forEach(item => {
-            // 容錯處理：嘗試抓取不同大小寫的 Key
             const desc = item.description || item.Description || item['Model Name'];
-            const vendor = item.vendor || item.Vendor;
             const swid = item.swid || item.SWID;
-            
-            // ★ 修改 2: 先抓取原始的 Component 值
-            let rawComp = item.component || item.Component; 
-
             const stat = item.status || item.Status;
             const driverVer = item.driver || item.Driver || item.Version;
             const osVer = item.os || item.OS;
 
-            // 防呆：如果還是沒抓到 Description 就跳過
+            // ★ 修改 2: 先抓取原始值
+            let rawComp = item.component || item.Component; 
+            let rawVendor = item.vendor || item.Vendor; // 新增：抓取原始廠商值
+
+            // 防呆
             if (!desc) return;
 
-            // ★ 修改 3: 實作「向下填滿」邏輯
-            // 如果這一格有值，就更新記憶；如果是空的，就沿用上一個記憶的值
+            // ==========================================
+            // ★ 核心邏輯：Component 向下填滿
+            // ==========================================
             if (rawComp && rawComp.trim() !== '') {
                 lastComponent = rawComp;
             } else {
                 rawComp = lastComponent;
             }
+
+            // ==========================================
+            // ★ 新增邏輯：Vendor 也向下填滿 (解決 Generic 問題)
+            // ==========================================
+            if (rawVendor && rawVendor.trim() !== '') {
+                lastVendor = rawVendor;
+            } else {
+                rawVendor = lastVendor;
+            }
+            // ==========================================
 
             const modelKey = desc.trim();
 
@@ -96,13 +105,13 @@ sheetsData.forEach((sheet, index) => {
                 aggregatedMap[modelKey] = {
                     id: swid || '',            
                     model: desc, 
-                    brand: vendor || 'Generic',
                     
-                    // ★ 修改 4: 這裡改用處理過(已填滿)的 rawComp
+                    // ★ 修改 3: 使用處理過(已填滿)的 rawVendor
+                    brand: rawVendor || 'Generic', 
+                    
                     type: rawComp || 'N/A',    
-                    
                     status: stat || '', 
-                    drivers: [] // 初始化 drivers 陣列
+                    drivers: [] 
                 };
             }
 
@@ -375,4 +384,5 @@ window.switchDriver = function(cardId, driverIndex) {
 // 啟動程式
 
 window.onload = initData;
+
 
